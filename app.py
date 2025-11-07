@@ -160,146 +160,201 @@ col1, col2 = st.sidebar.columns(2)
 with col1:
     year = st.number_input("Año", min_value=2020, max_value=2100, value=today.year, step=1)
 with col2:
-    month = st.number_input("Mes (1-12)", min_value=1, max_value=12, value=today.month, step=1)
+    mes_nombre_sidebar = st.selectbox("Mes", MESES_ES, index=today.month - 1)
+    month = MES_A_NUM[mes_nombre_sidebar]
 start_dt, end_dt = month_range(int(year), int(month))
 
 # ---------- Registrar una clase ----------
-st.subheader("Registrar una clase")
-
-existing_clients = fetch_distinct_clients()
-SEL_NEW = "(Escribir nombre nuevo)"
-cliente_sel = st.selectbox("Cliente", [SEL_NEW] + existing_clients, index=0)
-cliente_input = st.text_input("Nombre del cliente*", placeholder="Ej: Juano Monroy") if cliente_sel == SEL_NEW else cliente_sel
-
-with st.form("form_registro", clear_on_submit=True):
-    c1, c2 = st.columns(2)
-    with c1:
-        amount = st.number_input("Valor de la clase*", min_value=0.0, step=1000.0, value=30000.0)
-    with c2:
-        now_time = datetime.now().time().replace(second=0, microsecond=0)
-        class_time = st.time_input("Hora*", value=now_time)
-    class_date = st.date_input("Fecha*", value=today)
-
-    if st.form_submit_button("Guardar clase"):
-        if not cliente_input or not cliente_input.strip():
-            st.error("Por favor, escribe o selecciona el nombre del cliente.")
-        else:
-            ts = datetime.combine(class_date, class_time)
-            add_session(cliente_input, ts, amount)
-            st.success(f"Clase guardada para **{normalize_client(cliente_input)}** el {class_date} a las {class_time} por **{fmt_money(amount)}**.")
-
-# ---------- Clases del mes ----------
 df_mes = fetch_sessions_between(start_dt, end_dt)
-st.subheader(f"Clases del mes: {month_label_es(int(year), int(month))}")
-if df_mes.empty:
-    st.info("No hay registros en este mes.")
-else:
-    vista = df_mes.copy()
-    vista["Cliente"] = vista["client"].apply(normalize_client)
-    vista["N°"] = range(1, len(vista) + 1)
-    vista["Valor"] = vista["amount"].apply(fmt_money)
-    vista = vista[["N°","Cliente","fecha","hora","Valor","id"]].rename(columns={"fecha":"Fecha","hora":"Hora"})
-    st.dataframe(vista[["N°","Cliente","Fecha","Hora","Valor"]], use_container_width=True)
 
-    with st.expander("🧹 Borrar un registro"):
-        opciones = []
-        for _, r in vista.iterrows():
-            label = f"N° {int(r['N°'])} — {r['Cliente']} — {r['Fecha']} {r['Hora']} — {r['Valor']}"
-            opciones.append((label, int(r["id"])))
-        if opciones:
-            sel_label = st.selectbox("Selecciona el registro a borrar", [o[0] for o in opciones])
-            label2id = {lbl: rid for lbl, rid in opciones}
-            if st.button("Borrar seleccionado"):
-                delete_session(label2id[sel_label])
-                st.success("Registro borrado. Refresca (R) para actualizar la tabla.")
+# ======== Tabs principales ========
+tab_registro, tab_calendario = st.tabs(["📋 Registro & Resumen", "📆 Calendario"])
 
-# ---------- Resumen por persona (mes seleccionado) ----------
-st.subheader("Resumen por persona (mes seleccionado)")
-if df_mes.empty:
-    st.info("No hay datos para resumir en este mes.")
-else:
-    resumen = (
-        df_mes.groupby(df_mes["client"].apply(normalize_client))
-        .agg(Clases=("id","count"), Monto=("amount","sum"))
-        .reset_index().rename(columns={"index":"Cliente", 0:"Cliente"})
-    )
-    # Acomodar nombre de columna cliente
-    if "client" in resumen.columns:
-        resumen = resumen.rename(columns={"client":"Cliente"})
-    elif "index" in resumen.columns:
-        resumen = resumen.rename(columns={"index":"Cliente"})
+# ---------- TAB 1: Registro & Resumen ----------
+with tab_registro:
+    # --- Formulario: Registrar una clase ---
+    st.subheader("Registrar una clase")
+    existing_clients = fetch_distinct_clients()
+    SEL_NEW = "(Escribir nombre nuevo)"
+    cliente_sel = st.selectbox("Cliente", [SEL_NEW] + existing_clients, index=0)
+    cliente_input = st.text_input("Nombre del cliente*", placeholder="Ej: Juano Monroy") if cliente_sel == SEL_NEW else cliente_sel
 
-    resumen["Monto"] = resumen["Monto"].apply(fmt_money)
+    with st.form("form_registro", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            amount = st.number_input("Valor de la clase*", min_value=0.0, step=1000.0, value=30000.0)
+        with c2:
+            now_time = datetime.now().time().replace(second=0, microsecond=0)
+            class_time = st.time_input("Hora*", value=now_time)
+        class_date = st.date_input("Fecha*", value=today)
 
-    estados = []
-    for _, row in resumen.iterrows():
-        m = get_monthly_payment(row["Cliente"], int(year), int(month))
-        estados.append("Pagado" if m["paid"] == 1 else "Pendiente")
-    resumen["Estado mes"] = estados
+        if st.form_submit_button("Guardar clase"):
+            if not cliente_input or not cliente_input.strip():
+                st.error("Por favor, escribe o selecciona el nombre del cliente.")
+            else:
+                ts = datetime.combine(class_date, class_time)
+                add_session(cliente_input, ts, amount)
+                st.success(f"Clase guardada para **{normalize_client(cliente_input)}** el {class_date} a las {class_time} por **{fmt_money(amount)}**.")
 
-    total_global = df_mes["amount"].sum()
-    total_clases_global = df_mes.shape[0]
-    st.write(f"**Total de clases del mes:** {total_clases_global} | **Total a cobrar:** {fmt_money(total_global)}")
-    st.dataframe(resumen[["Cliente","Clases","Monto","Estado mes"]], use_container_width=True)
-
-# ---------- Actualizar pago mensual ----------
-st.markdown("### Actualizar estado de pago mensual")
-all_clients = fetch_distinct_clients()
-if not all_clients:
-    st.info("Aún no hay clientes registrados.")
-else:
-    ccol1, ccol2, ccol3 = st.columns([2,1,1])
-    with ccol1:
-        cliente_pago = st.selectbox("Cliente", all_clients, key="cliente_pago_mensual")
-    with ccol2:
-        year_sel = st.number_input("Año del pago", min_value=2020, max_value=2100, value=int(year), step=1)
-    with ccol3:
-        mes_nombre_sel = st.selectbox("Mes del pago", MESES_ES, index=int(month)-1)
-        month_sel = MES_A_NUM[mes_nombre_sel]
-
-    start_x, end_x = month_range(int(year_sel), int(month_sel))
-    df_cliente_mes = fetch_sessions_between(start_x, end_x)
-    total_cliente_mes = 0.0
-    if not df_cliente_mes.empty:
-        df_cliente_mes["client"] = df_cliente_mes["client"].apply(normalize_client)
-        total_cliente_mes = df_cliente_mes[df_cliente_mes["client"] == normalize_client(cliente_pago)]["amount"].sum()
-    st.write(f"**Total de {cliente_pago} en {month_label_es(int(year_sel), int(month_sel))}: {fmt_money(total_cliente_mes)}**")
-
-    estado_actual_info = get_monthly_payment(cliente_pago, int(year_sel), int(month_sel))
-    estado_actual = (estado_actual_info["paid"] == 1)
-    pagado_mes_ui = st.checkbox("Marcar este mes como pagado", value=estado_actual, key="chk_pagado_mes")
-
-    default_fecha_pago = date.today() if estado_actual_info["paid_on"] is None else date.fromisoformat(estado_actual_info["paid_on"])
-    fecha_pago_ui = st.date_input("Fecha de pago (exacta)", value=default_fecha_pago)
-
-    if st.button("Guardar estado de pago mensual"):
-        set_monthly_payment(cliente_pago, int(year_sel), int(month_sel), pagado_mes_ui, fecha_pago_ui)
-        st.success(
-            f"Estado del mes para **{cliente_pago}** "
-            f"({month_label_es(int(year_sel), int(month_sel))}) actualizado a: "
-            f"{'Pagado' if pagado_mes_ui else 'Pendiente'}."
-        )
-
-# ---------- Historial por cliente ----------
-st.markdown("### Historial de meses por cliente")
-if not all_clients:
-    st.info("Aún no hay clientes para mostrar historial.")
-else:
-    cliente_hist = st.selectbox("Cliente", all_clients, key="cliente_hist")
-    agg_cli = sessions_agg_by_client_month(cliente_hist)
-    if agg_cli.empty:
-        st.info("Ese cliente todavía no tiene clases registradas.")
+    # --- Clases del mes ---
+    st.subheader(f"Clases del mes: {month_label_es(int(year), int(month))}")
+    if df_mes.empty:
+        st.info("No hay registros en este mes.")
     else:
-        hist = join_with_payments(agg_cli)
-        hist["Mes (texto)"] = hist.apply(lambda r: month_label_es(int(r["Año"]), int(r["Mes"])), axis=1)
-        hist["Monto"] = hist["Monto"].apply(fmt_money)
-        hist = hist[["Mes (texto)","Clases","Monto","Estado mes","Fecha pago mes"]].sort_values(["Mes (texto)"])
-        st.dataframe(hist, use_container_width=True)
+        vista = df_mes.copy()
+        vista["Cliente"] = vista["client"].apply(normalize_client)
+        vista["N°"] = range(1, len(vista) + 1)
+        vista["Valor"] = vista["amount"].apply(fmt_money)
+        vista = vista[["N°","Cliente","fecha","hora","Valor","id"]].rename(columns={"fecha":"Fecha","hora":"Hora"})
+        st.dataframe(vista[["N°","Cliente","Fecha","Hora","Valor"]], use_container_width=True)
 
-        csv_bytes = hist.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label=f"⬇️ Descargar historial de {cliente_hist}",
-            data=csv_bytes,
-            file_name=f"historial_{cliente_hist.replace(' ', '_')}.csv",
-            mime="text/csv"
+        with st.expander("🧹 Borrar un registro"):
+            opciones = []
+            for _, r in vista.iterrows():
+                label = f"N° {int(r['N°'])} — {r['Cliente']} — {r['Fecha']} {r['Hora']} — {r['Valor']}"
+                opciones.append((label, int(r["id"])))
+            if opciones:
+                sel_label = st.selectbox("Selecciona el registro a borrar", [o[0] for o in opciones])
+                label2id = {lbl: rid for lbl, rid in opciones}
+                if st.button("Borrar seleccionado"):
+                    delete_session(label2id[sel_label])
+                    st.success("Registro borrado. Refresca (R) para actualizar la tabla.")
+
+    # --- Resumen por persona (mes seleccionado) ---
+    st.subheader("Resumen por persona (mes seleccionado)")
+    if df_mes.empty:
+        st.info("No hay datos para resumir en este mes.")
+    else:
+        resumen = (
+            df_mes.groupby(df_mes["client"].apply(normalize_client))
+            .agg(Clases=("id","count"), Monto=("amount","sum"))
+            .reset_index().rename(columns={"index":"Cliente", 0:"Cliente"})
         )
+        if "client" in resumen.columns:
+            resumen = resumen.rename(columns={"client":"Cliente"})
+        elif "index" in resumen.columns:
+            resumen = resumen.rename(columns={"index":"Cliente"})
+        resumen["Monto"] = resumen["Monto"].apply(fmt_money)
+
+        estados = []
+        for _, row in resumen.iterrows():
+            m = get_monthly_payment(row["Cliente"], int(year), int(month))
+            estados.append("Pagado" if m["paid"] == 1 else "Pendiente")
+        resumen["Estado mes"] = estados
+
+        total_global = df_mes["amount"].sum()
+        total_clases_global = df_mes.shape[0]
+        st.write(f"**Total de clases del mes:** {total_clases_global} | **Total a cobrar:** {fmt_money(total_global)}")
+        st.dataframe(resumen[["Cliente","Clases","Monto","Estado mes"]], use_container_width=True)
+
+    # --- Actualizar pago mensual ---
+    st.markdown("### Actualizar estado de pago mensual")
+    all_clients = fetch_distinct_clients()
+    if not all_clients:
+        st.info("Aún no hay clientes registrados.")
+    else:
+        ccol1, ccol2, ccol3 = st.columns([2,1,1])
+        with ccol1:
+            cliente_pago = st.selectbox("Cliente", all_clients, key="cliente_pago_mensual")
+        with ccol2:
+            year_sel = st.number_input("Año del pago", min_value=2020, max_value=2100, value=int(year), step=1)
+        with ccol3:
+            mes_nombre_sel = st.selectbox("Mes del pago", MESES_ES, index=int(month)-1)
+            month_sel = MES_A_NUM[mes_nombre_sel]
+
+        start_x, end_x = month_range(int(year_sel), int(month_sel))
+        df_cliente_mes = fetch_sessions_between(start_x, end_x)
+        total_cliente_mes = 0.0
+        if not df_cliente_mes.empty:
+            df_cliente_mes["client"] = df_cliente_mes["client"].apply(normalize_client)
+            total_cliente_mes = df_cliente_mes[df_cliente_mes["client"] == normalize_client(cliente_pago)]["amount"].sum()
+        st.write(f"**Total de {cliente_pago} en {month_label_es(int(year_sel), int(month_sel))}: {fmt_money(total_cliente_mes)}**")
+
+        estado_actual_info = get_monthly_payment(cliente_pago, int(year_sel), int(month_sel))
+        estado_actual = (estado_actual_info["paid"] == 1)
+        pagado_mes_ui = st.checkbox("Marcar este mes como pagado", value=estado_actual, key="chk_pagado_mes")
+
+        default_fecha_pago = date.today() if estado_actual_info["paid_on"] is None else date.fromisoformat(estado_actual_info["paid_on"])
+        fecha_pago_ui = st.date_input("Fecha de pago (exacta)", value=default_fecha_pago)
+
+        if st.button("Guardar estado de pago mensual"):
+            set_monthly_payment(cliente_pago, int(year_sel), int(month_sel), pagado_mes_ui, fecha_pago_ui)
+            st.success(
+                f"Estado del mes para **{cliente_pago}** "
+                f"({month_label_es(int(year_sel), int(month_sel))}) actualizado a: "
+                f"{'Pagado' if pagado_mes_ui else 'Pendiente'}."
+            )
+
+    # --- Historial por cliente ---
+    st.markdown("### Historial de meses por cliente")
+    if not all_clients:
+        st.info("Aún no hay clientes para mostrar historial.")
+    else:
+        cliente_hist = st.selectbox("Cliente", all_clients, key="cliente_hist")
+        agg_cli = sessions_agg_by_client_month(cliente_hist)
+        if agg_cli.empty:
+            st.info("Ese cliente todavía no tiene clases registradas.")
+        else:
+            hist = join_with_payments(agg_cli)
+            hist["Mes (texto)"] = hist.apply(lambda r: month_label_es(int(r["Año"]), int(r["Mes"])), axis=1)
+            hist["Monto"] = hist["Monto"].apply(fmt_money)
+            hist = hist[["Mes (texto)","Clases","Monto","Estado mes","Fecha pago mes"]].sort_values(["Mes (texto)"])
+            st.dataframe(hist, use_container_width=True)
+
+            csv_bytes = hist.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                label=f"⬇️ Descargar historial de {cliente_hist}",
+                data=csv_bytes,
+                file_name=f"historial_{cliente_hist.replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+
+# ---------- TAB 2: Calendario ----------
+with tab_calendario:
+    st.subheader(f"Calendario de {MESES_ES[int(month)-1]} {int(year)}")
+    if df_mes.empty:
+        st.info("No hay clases en este mes.")
+    else:
+        # Prepara mapa {fecha -> lista de clases} (versión robusta, sin apply raro)
+        df_cal = df_mes.sort_values(["fecha", "hora"]).copy()
+        clases_por_dia = {}
+        for f, g in df_cal.groupby("fecha"):
+            clases_por_dia[f] = [
+                {"client": r["client"], "hora": r["hora"], "amount": r["amount"]}
+                for _, r in g.iterrows()
+            ]
+
+        # Lunes a domingo
+        calendar.setfirstweekday(calendar.MONDAY)
+        weeks = calendar.monthcalendar(int(year), int(month))
+
+        # Encabezado
+        cols = st.columns(7)
+        for i, nombre in enumerate(["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"]):
+            with cols[i]:
+                st.markdown(f"**{nombre}**")
+
+        # Celdas del mes
+        for week in weeks:
+            cols = st.columns(7)
+            for i, day in enumerate(week):
+                with cols[i]:
+                    if day == 0:
+                        st.write("")  # celda vacía
+                        continue
+
+                    f = date(int(year), int(month), int(day))
+                    st.markdown(f"### {day}")
+
+                    if f in clases_por_dia:
+                        for item in clases_por_dia[f]:
+                            cli = normalize_client(item["client"])
+                            hora = item["hora"]
+                            val = fmt_money(item["amount"])
+                            st.markdown(f"- **{hora}** · {cli} · {val}")
+                        total_dia = sum(x["amount"] for x in clases_por_dia[f] if "amount" in x and pd.notna(x["amount"]))
+                        st.caption(f"Total del día: {fmt_money(total_dia)}")
+                    else:
+                        st.caption("— sin clases —")
+
+
