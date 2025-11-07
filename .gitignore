@@ -1,0 +1,32 @@
+# --- Python / build ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# --- Entornos virtuales ---
+.venv/
+venv/
+env/
+
+# --- Notebooks / cachés ---
+.ipynb_checkpoints/
+
+# --- SO / IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Config / credenciales ---
+# NUNCA subas secrets reales
+.streamlit/secrets.toml
+.env
+*.env
+
+# --- Datos locales (por si dejaste SQLite u otros) ---
+*.db
+*.sqlite
+*.sqlite3
+data/
