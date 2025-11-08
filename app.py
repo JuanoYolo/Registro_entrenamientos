@@ -1,6 +1,7 @@
-# app.py — versión Supabase (persistencia en la nube)
+# app.py — Supabase + Auth (OTP por email) + Tabs + Calendario
 
 import os
+import time
 import calendar
 from datetime import datetime, date
 
@@ -9,11 +10,13 @@ import streamlit as st
 from supabase import create_client, Client
 
 # ==============================
-# Configuración y utilidades
+# Configuración de página
 # ==============================
-
 st.set_page_config(page_title="Entrenos - Registro y Resumen", page_icon="💪", layout="wide")
 
+# ==============================
+# Utilidades generales
+# ==============================
 MESES_ES = [
     "Enero","Febrero","Marzo","Abril","Mayo","Junio",
     "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
@@ -41,31 +44,138 @@ def normalize_client(raw: str) -> str:
     return s.title()
 
 # ==============================
-# Supabase (capa de datos)
+# Supabase: cliente y Auth
 # ==============================
+# --- Login con Supabase Auth (email + OTP) + allow-list ---
 
 def supa() -> Client:
     url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
     key = os.environ.get("SUPABASE_ANON_KEY") or st.secrets["SUPABASE_ANON_KEY"]
     return create_client(url, key)
 
-def init_db():
-    # Tablas y policies ya se crearon desde el SQL en Supabase Studio.
-    return
+def supa_authd() -> Client:
+    c = supa()
+    sess = st.session_state.get("sb_session")
+    if sess:
+        c.postgrest.auth(sess["access_token"])
+    return c
 
+def logged_in() -> bool:
+    return st.session_state.get("sb_session") is not None
+
+def current_user_email() -> str | None:
+    """Obtiene el email del usuario autenticado usando el access_token guardado."""
+    try:
+        sess = st.session_state.get("sb_session")
+        if not sess:
+            return None
+        token = sess.get("access_token")
+        if not token:
+            return None
+        u = supa().auth.get_user(token)
+        return (u.user.email if u and u.user else None)
+    except:
+        return None
+
+
+def is_current_admin() -> bool:
+    """Devuelve True si el usuario autenticado está en admin_emails."""
+    try:
+        em = current_user_email()
+        if not em:
+            return False
+        resp = (supa_authd().table("admin_emails")
+                .select("email").eq("email", em).execute())
+        return bool(resp.data)
+    except:
+        return False
+
+def login_ui():
+    st.markdown("### 🔐 Inicia sesión")
+    email = st.text_input("Correo", placeholder="tu-correo@ejemplo.com")
+
+    if st.button("Enviar código al correo"):
+        if not email:
+            st.error("Escribe tu correo.")
+            st.stop()
+
+        # 1) Pre-check en allow-list (RPC seguro)
+        try:
+            chk = supa().rpc("is_allowed", {"email_input": email.strip().lower()}).execute()
+            allowed = bool(chk.data)
+        except Exception as e:
+            st.error(f"No se pudo validar el acceso: {e}")
+            st.stop()
+
+        if not allowed:
+            st.error("Este correo no está autorizado. Pídele acceso al administrador.")
+            st.stop()
+
+        # 2) Enviar OTP (se crea usuario si no existe)
+        try:
+            supa().auth.sign_in_with_otp({"email": email.strip(), "should_create_user": True})
+            st.session_state["pending_email"] = email.strip()
+            st.success("Te enviamos un código. Revisa tu correo (principal/SPAM).")
+        except Exception as e:
+            st.error(f"No se pudo enviar el código: {e}")
+            st.stop()
+
+    if "pending_email" in st.session_state:
+        code = st.text_input("Código recibido (6 dígitos)", max_chars=10)
+        if st.button("Verificar código"):
+            try:
+                resp = supa().auth.verify_otp({
+                    "email": st.session_state["pending_email"],
+                    "token": code.strip(),
+                    "type": "email"
+                })
+                st.session_state["sb_session"] = {
+                    "access_token": resp.session.access_token,
+                    "refresh_token": resp.session.refresh_token
+                }
+                st.success("Sesión iniciada ✅")
+                time.sleep(0.4)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Código incorrecto o vencido: {e}")
+                st.stop()
+
+def require_login():
+    if not logged_in():
+        login_ui()
+        st.stop()
+    else:
+        # Barra lateral: estado + logout
+        user_em = current_user_email() or ""
+        st.sidebar.success(f"Sesión: {user_em}")
+        if st.sidebar.button("Cerrar sesión"):
+            try:
+                supa().auth.sign_out()
+            except:
+                pass
+            st.session_state.pop("sb_session", None)
+            st.rerun()
+
+
+# Exige login antes de mostrar la app
+require_login()
+
+# ==============================
+# Capa de datos (todas con supa_authd)
+# ==============================
 def add_session(client: str, ts: datetime, amount: float):
     client = normalize_client(client)
-    supa().table("sessions").insert({
+    supa_authd().table("sessions").insert({
         "client": client,
         "ts": ts.strftime("%Y-%m-%d %H:%M:%S"),
         "amount": float(amount)
     }).execute()
 
 def delete_session(row_id: int):
-    supa().table("sessions").delete().eq("id", row_id).execute()
+    supa_authd().table("sessions").delete().eq("id", row_id).execute()
 
 def fetch_sessions_between(start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
-    res = (supa().table("sessions")
+    res = (supa_authd().table("sessions")
            .select("*")
            .gte("ts", start_dt.strftime("%Y-%m-%d %H:%M:%S"))
            .lt("ts", end_dt.strftime("%Y-%m-%d %H:%M:%S"))
@@ -81,7 +191,7 @@ def fetch_sessions_between(start_dt: datetime, end_dt: datetime) -> pd.DataFrame
     return df[["id","client","fecha","hora","amount","ts"]]
 
 def fetch_distinct_clients() -> list:
-    res = supa().table("sessions").select("client").execute()
+    res = supa_authd().table("sessions").select("client").execute()
     df = pd.DataFrame(res.data)
     if df.empty:
         return []
@@ -90,7 +200,7 @@ def fetch_distinct_clients() -> list:
 
 def get_monthly_payment(client: str, year: int, month: int) -> dict:
     client = normalize_client(client)
-    res = (supa().table("monthly_payments")
+    res = (supa_authd().table("monthly_payments")
            .select("paid, paid_on")
            .eq("client", client).eq("year", int(year)).eq("month", int(month))
            .execute())
@@ -108,11 +218,10 @@ def set_monthly_payment(client: str, year: int, month: int, paid: bool, paid_on:
         "paid": bool(paid),
         "paid_on": paid_on.isoformat() if (paid and paid_on) else None
     }
-    # upsert por clave compuesta (client, year, month)
-    supa().table("monthly_payments").upsert(payload, on_conflict="client,year,month").execute()
+    supa_authd().table("monthly_payments").upsert(payload, on_conflict="client,year,month").execute()
 
 def sessions_agg_by_client_month(client: str | None = None) -> pd.DataFrame:
-    res = supa().table("sessions").select("client, ts, amount").execute()
+    res = supa_authd().table("sessions").select("client, ts, amount").execute()
     df = pd.DataFrame(res.data)
     if df.empty:
         return pd.DataFrame(columns=["Cliente","Año","Mes","Clases","Monto"])
@@ -131,7 +240,7 @@ def sessions_agg_by_client_month(client: str | None = None) -> pd.DataFrame:
 def join_with_payments(agg_df: pd.DataFrame) -> pd.DataFrame:
     if agg_df.empty:
         return agg_df
-    res = supa().table("monthly_payments").select("client, year, month, paid, paid_on").execute()
+    res = supa_authd().table("monthly_payments").select("client, year, month, paid, paid_on").execute()
     pays = pd.DataFrame(res.data)
     if pays.empty:
         agg_df["Estado mes"] = "Pendiente"
@@ -148,13 +257,58 @@ def join_with_payments(agg_df: pd.DataFrame) -> pd.DataFrame:
 # ==============================
 # UI
 # ==============================
-
-init_db()
-
 st.title("💪 Registro de Entrenos para Cobro")
 st.caption("Registra clases y lleva el pago por **mes** y por **persona**. Persistencia en Supabase.")
 
-# Sidebar: filtros de mes/año para visualizar
+# ===== Panel admin: gestionar lista blanca =====
+with st.expander("🔑 Gestión de accesos (solo admin)"):
+    if is_current_admin():
+        st.info("Solo los correos de esta lista podrán iniciar sesión en la app.")
+        col_a, col_b = st.columns([2,1])
+        with col_a:
+            nuevo = st.text_input("Agregar correo a la lista", placeholder="correo@ejemplo.com", key="add_allow")
+        with col_b:
+            if st.button("➕ Agregar"):
+                if not nuevo:
+                    st.warning("Escribe un correo.")
+                else:
+                    try:
+                        supa_authd().table("allowed_emails").upsert({
+                            "email": nuevo.strip().lower(),
+                            "created_by": current_user_email()
+                        }).execute()
+                        st.success("Correo agregado a la lista blanca.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo agregar: {e}")
+
+        # Listado y borrado
+        try:
+            lista = (supa_authd()
+                     .table("allowed_emails")
+                     .select("email, created_at, created_by")
+                     .order("created_at", desc=True)
+                     .execute())
+            df_allow = pd.DataFrame(lista.data)
+            if df_allow.empty:
+                st.caption("No hay correos permitidos aún.")
+            else:
+                st.dataframe(df_allow, use_container_width=True)
+                borrar = st.text_input("Correo a borrar", placeholder="correo@ejemplo.com", key="del_allow")
+                if st.button("🗑️ Borrar"):
+                    try:
+                        supa_authd().table("allowed_emails").delete().eq("email", borrar.strip().lower()).execute()
+                        st.success("Correo eliminado de la lista.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo eliminar: {e}")
+        except Exception as e:
+            st.error(f"No se pudo cargar la lista: {e}")
+    else:
+        st.caption("Debes ser administrador para ver/editar esta sección.")
+
+
+# Sidebar: filtros de mes/año (mes por nombre)
 today = date.today()
 col1, col2 = st.sidebar.columns(2)
 with col1:
@@ -164,15 +318,15 @@ with col2:
     month = MES_A_NUM[mes_nombre_sidebar]
 start_dt, end_dt = month_range(int(year), int(month))
 
-# ---------- Registrar una clase ----------
+# Datos del mes
 df_mes = fetch_sessions_between(start_dt, end_dt)
 
-# ======== Tabs principales ========
+# Tabs
 tab_registro, tab_calendario = st.tabs(["📋 Registro & Resumen", "📆 Calendario"])
 
 # ---------- TAB 1: Registro & Resumen ----------
 with tab_registro:
-    # --- Formulario: Registrar una clase ---
+    # Formulario: Registrar una clase
     st.subheader("Registrar una clase")
     existing_clients = fetch_distinct_clients()
     SEL_NEW = "(Escribir nombre nuevo)"
@@ -196,7 +350,7 @@ with tab_registro:
                 add_session(cliente_input, ts, amount)
                 st.success(f"Clase guardada para **{normalize_client(cliente_input)}** el {class_date} a las {class_time} por **{fmt_money(amount)}**.")
 
-    # --- Clases del mes ---
+    # Clases del mes
     st.subheader(f"Clases del mes: {month_label_es(int(year), int(month))}")
     if df_mes.empty:
         st.info("No hay registros en este mes.")
@@ -220,7 +374,7 @@ with tab_registro:
                     delete_session(label2id[sel_label])
                     st.success("Registro borrado. Refresca (R) para actualizar la tabla.")
 
-    # --- Resumen por persona (mes seleccionado) ---
+    # Resumen por persona
     st.subheader("Resumen por persona (mes seleccionado)")
     if df_mes.empty:
         st.info("No hay datos para resumir en este mes.")
@@ -247,7 +401,7 @@ with tab_registro:
         st.write(f"**Total de clases del mes:** {total_clases_global} | **Total a cobrar:** {fmt_money(total_global)}")
         st.dataframe(resumen[["Cliente","Clases","Monto","Estado mes"]], use_container_width=True)
 
-    # --- Actualizar pago mensual ---
+    # Actualizar pago mensual
     st.markdown("### Actualizar estado de pago mensual")
     all_clients = fetch_distinct_clients()
     if not all_clients:
@@ -285,7 +439,7 @@ with tab_registro:
                 f"{'Pagado' if pagado_mes_ui else 'Pendiente'}."
             )
 
-    # --- Historial por cliente ---
+    # Historial por cliente
     st.markdown("### Historial de meses por cliente")
     if not all_clients:
         st.info("Aún no hay clientes para mostrar historial.")
@@ -315,7 +469,7 @@ with tab_calendario:
     if df_mes.empty:
         st.info("No hay clases en este mes.")
     else:
-        # Prepara mapa {fecha -> lista de clases} (versión robusta, sin apply raro)
+        # Prepara mapa {fecha -> lista de clases} (robusto)
         df_cal = df_mes.sort_values(["fecha", "hora"]).copy()
         clases_por_dia = {}
         for f, g in df_cal.groupby("fecha"):
@@ -342,10 +496,8 @@ with tab_calendario:
                     if day == 0:
                         st.write("")  # celda vacía
                         continue
-
                     f = date(int(year), int(month), int(day))
                     st.markdown(f"### {day}")
-
                     if f in clases_por_dia:
                         for item in clases_por_dia[f]:
                             cli = normalize_client(item["client"])
@@ -356,5 +508,3 @@ with tab_calendario:
                         st.caption(f"Total del día: {fmt_money(total_dia)}")
                     else:
                         st.caption("— sin clases —")
-
-
